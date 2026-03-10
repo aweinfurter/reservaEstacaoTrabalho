@@ -1,3 +1,4 @@
+import configparser
 import os
 import shutil
 import time
@@ -23,9 +24,22 @@ TARGET_YEAR  = None
 START_TIME = "0800"    # Horário de início (formato hhmm)
 END_TIME   = "1800"    # Horário de fim    (formato hhmm)
 
-BUILDING    = "Joinville › Santa Catarina - Bloco B"
-FLOOR       = "3º Andar"
-WORKSTATION = "B063"
+# Lê as variáveis sensíveis do arquivo config.cfg (não commitado no git)
+_cfg = configparser.ConfigParser()
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.cfg")
+if not os.path.exists(_cfg_path):
+    raise FileNotFoundError(
+        f"Arquivo de configuração não encontrado: {_cfg_path}\n"
+        "Copie o config.cfg.example e preencha com seus dados."
+    )
+_cfg.read(_cfg_path, encoding="utf-8")
+
+BUILDING      = _cfg.get("reserva", "building")
+FLOOR         = _cfg.get("reserva", "floor")
+WORKSTATION   = _cfg.get("reserva", "workstation")
+CHECKIN_CODE  = _cfg.get("reserva", "checkin_code", fallback="")
+LOGIN         = _cfg.get("auth", "login", fallback="")
+SENHA         = _cfg.get("auth", "senha", fallback="")
 
 # Perfil original do Chrome — onde está a sessão SSO salva.
 CHROME_PROFILE_DIR = os.path.expanduser("~/.config/google-chrome")
@@ -340,6 +354,130 @@ def confirm_reservation(driver):
     print("⚠  Botão de confirmação não encontrado automaticamente. Confirme manualmente.")
 
 
+# ── Check-in ─────────────────────────────────────────────────
+
+def do_checkin(driver, checkin_code: str):
+    """
+    Realiza o check-in da primeira reserva disponível em 'Minhas Reservas'.
+
+    Fluxo:
+      1. Acessa /app/booking/my
+      2. Clica no botão 'checkin' (quando habilitado)
+      3. No modal que abre, insere o checkin_code
+      4. Confirma
+    """
+    print("\n[→] Acessando 'Minhas Reservas' para check-in...")
+    driver.get("https://totvs.deskbee.app/app/booking/my")
+    handle_sso_login(driver)
+
+    # Aguarda ao menos um card de reserva carregar
+    WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-bee='my-bookings.item.datetime']"))
+    )
+
+    # O botão ativo NÃO tem a classe 'booking-my-button-checkin-disable'
+    # nem o atributo `disabled`. Procura a primeira ocorrência habilitada.
+    xpath_ativo = (
+        "//button[contains(@class,'booking-my-button-checkin')"
+        " and not(contains(@class,'booking-my-button-checkin-disable'))"
+        " and not(@disabled)"
+        " and .//span[normalize-space(text())='checkin']]"
+    )
+
+    print("  → Procurando botão de check-in habilitado...")
+    try:
+        btn_checkin = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, xpath_ativo))
+        )
+    except Exception:
+        # Verifica se existe mas ainda desabilitado — apenas avisa e pula
+        todos = driver.find_elements(
+            By.XPATH,
+            "//button[contains(@class,'booking-my-button-checkin')"
+            " and .//span[normalize-space(text())='checkin']]"
+        )
+        if todos:
+            print("  ⚠  Botão de check-in ainda desabilitado — check-in não disponível agora. Pulando.")
+        else:
+            print("  ⚠  Botão de check-in não encontrado na página de reservas. Pulando.")
+        return
+
+    scroll_and_click(driver, btn_checkin)
+    print("  → Botão de check-in clicado. Aguardando modal...")
+
+    # Aguarda o modal/dialog abrir
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".q-dialog, [role='dialog']"))
+    )
+    print("  → Modal aberto. Inserindo código de check-in...")
+
+    # Tenta localizar o input dentro do modal — múltiplas estratégias
+    input_selectors = [
+        "input[data-bee='checkin.code']",
+        "input[data-bee='booking.checkin.code']",
+        "input[data-bee='my-bookings.checkin.code']",
+        ".q-dialog input[type='text']",
+        ".q-dialog input",
+        "[role='dialog'] input[type='text']",
+        "[role='dialog'] input",
+    ]
+
+    code_input = None
+    for sel in input_selectors:
+        try:
+            code_input = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+            )
+            print(f"  → Input encontrado via: {sel}")
+            break
+        except Exception:
+            continue
+
+    if code_input is None:
+        raise Exception(
+            "Input do código de check-in não encontrado no modal.\n"
+            "Verifique o HTML do modal e ajuste os seletores em do_checkin()."
+        )
+
+    # Preenche o código
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", code_input)
+    driver.execute_script("arguments[0].click();", code_input)
+    time.sleep(0.2)
+    driver.execute_script(
+        "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input'));",
+        code_input,
+    )
+    code_input.send_keys(checkin_code)
+    driver.execute_script(
+        "arguments[0].dispatchEvent(new Event('input'));"
+        "arguments[0].dispatchEvent(new Event('change'));",
+        code_input,
+    )
+    print(f"  → Código '{checkin_code}' inserido!")
+    time.sleep(0.3)
+
+    # Clica em confirmar dentro do modal
+    confirm_candidates = [
+        "//button[.//span[contains(normalize-space(text()),'Confirmar')]]",
+        "//button[.//span[contains(normalize-space(text()),'Fazer check-in')]]",
+        "//button[.//span[contains(normalize-space(text()),'Check-in')]]",
+        "//button[.//span[contains(normalize-space(text()),'Enviar')]]",
+        "//button[.//span[contains(normalize-space(text()),'OK')]]",
+    ]
+    for xpath in confirm_candidates:
+        try:
+            confirm_btn = WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            scroll_and_click(driver, confirm_btn)
+            print("✔  Check-in realizado com sucesso!")
+            return
+        except Exception:
+            continue
+
+    print("⚠  Botão de confirmação do modal não encontrado. Confirme manualmente.")
+
+
 # ── Data automática ──────────────────────────────────────────
 
 def next_monday_after(date: datetime) -> datetime:
@@ -350,10 +488,44 @@ def next_monday_after(date: datetime) -> datetime:
     return date + timedelta(days=days_ahead)
 
 
+def handle_sso_login(driver, timeout=120):
+    """
+    Se a página atual for o login SSO, clica em 'Entrar com SSO' e aguarda
+    o redirecionamento de volta para o app (pode exigir credenciais externas).
+    """
+    try:
+        # Aguarda um pouco para a página estabilizar
+        WebDriverWait(driver, 5).until(
+            lambda d: d.current_url != "about:blank"
+        )
+    except Exception:
+        pass
+
+    if "/login" not in driver.current_url:
+        return  # já está autenticado, nada a fazer
+
+    print("  → Página de login detectada. Clicando em 'Entrar com SSO'...")
+    btn = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((
+            By.XPATH,
+            "//button[.//span[normalize-space(text())='Entrar com SSO']]"
+        ))
+    )
+    btn.click()
+
+    # Aguarda o redirecionamento de volta para o app после SSO externo
+    print(f"  → Aguardando conclusão do login SSO (até {timeout}s)...")
+    WebDriverWait(driver, timeout).until(
+        lambda d: "/login" not in d.current_url and "deskbee.app" in d.current_url
+    )
+    print("  → Login SSO concluído!")
+
+
 def get_last_reservation_date(driver) -> datetime:
     """Acessa diretamente a página de reservas, lê todas as datas e retorna a mais recente."""
     print("\n[→] Acessando 'Minhas reservas'...")
     driver.get("https://totvs.deskbee.app/app/booking/my")
+    handle_sso_login(driver)
 
     # Aguarda ao menos um card de reserva carregar
     WebDriverWait(driver, 15).until(
@@ -410,6 +582,7 @@ def main():
         # 2. Vai para a página inicial
         print("\n[2/14] Acessando a página inicial...")
         driver.get("https://totvs.deskbee.app/app/home")
+        handle_sso_login(driver)
         WebDriverWait(driver, 30).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -479,14 +652,9 @@ def main():
         click_lista_view(driver)
 
         # 13. Estação  ← COMENTADO PARA TESTES
-        # print(f"[14/14] Selecionando estação: {WORKSTATION}...")
-        # select_workstation(driver, WORKSTATION)
-        # time.sleep(1)
-
-        # 14. Confirmar  ← COMENTADO PARA TESTES
-        # print("\n[14/14] Confirmando a reserva...")
-        # confirm_reservation(driver)
-        # time.sleep(3)
+        print(f"[14/14] Selecionando estação: {WORKSTATION}...")
+        select_workstation(driver, WORKSTATION)
+        time.sleep(1)
 
         print("\nProcesso concluído! (confirmação desabilitada para teste)")
 

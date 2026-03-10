@@ -1,0 +1,12 @@
+[reserva]
+building      = Joinville › Santa Catarina - Bloco B
+floor         = 3º Andar
+workstation   = B063
+checkin_code  = EST.JOIN.SC.BB.3/3B.B063
+
+
+[auth]
+# Credenciais usadas caso o SSO redirecione para login/senha
+# Deixe em branco se não usar
+login = 
+senha = 
