@@ -639,15 +639,26 @@ def next_monday_after(date: datetime) -> datetime:
 
 
 def get_last_reservation_date(driver) -> datetime:
-    """Acessa diretamente a página de reservas, lê todas as datas e retorna a mais recente."""
+    """
+    Acessa 'Minhas reservas' e retorna a data da última reserva encontrada.
+    Se não houver nenhuma reserva, retorna a data de hoje (a próxima segunda
+    será calculada a partir daqui).
+    """
     print("\n[→] Acessando 'Minhas reservas'...")
     driver.get("https://totvs.deskbee.app/app/booking/my")
     handle_sso_login(driver, LOGIN, SENHA)
 
-    # Aguarda ao menos um card de reserva carregar
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-bee='my-bookings.item.datetime']"))
-    )
+    # Aguarda a página carregar (skeleton, lista vazia ou cards)
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda d: (
+                d.find_elements(By.CSS_SELECTOR, "[data-bee='my-bookings.item.datetime']")
+                or d.find_elements(By.CSS_SELECTOR, "[data-bee='my-bookings.empty']")
+                or d.execute_script("return document.readyState") == "complete"
+            )
+        )
+    except Exception:
+        pass
 
     # Lê todas as datas exibidas — formato: "31/03/2026 - 08:00 às 18:00"
     elements = driver.find_elements(By.CSS_SELECTOR, "[data-bee='my-bookings.item.datetime']")
@@ -660,7 +671,8 @@ def get_last_reservation_date(driver) -> datetime:
             continue
 
     if not dates:
-        raise Exception("Nenhuma reserva encontrada em 'Minhas reservas'.")
+        print("[→] Nenhuma reserva encontrada. Calculando a partir de hoje.")
+        return datetime.today()
 
     last_date = max(dates)
     print(f"[→] Última reserva encontrada: {last_date.strftime('%d/%m/%Y')}")
