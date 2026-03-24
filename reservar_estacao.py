@@ -11,6 +11,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from sso_login import handle_sso_login
+
 # ============================================================
 # CONFIGURAÇÕES - Edite aqui conforme necessário
 # ============================================================
@@ -25,7 +27,8 @@ START_TIME = "0800"    # Horário de início (formato hhmm)
 END_TIME   = "1800"    # Horário de fim    (formato hhmm)
 
 # Lê as variáveis sensíveis do arquivo config.cfg (não commitado no git)
-_cfg = configparser.ConfigParser()
+# interpolation=None evita erros quando a senha contém o caractere '%'
+_cfg = configparser.ConfigParser(interpolation=None)
 _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.cfg")
 if not os.path.exists(_cfg_path):
     raise FileNotFoundError(
@@ -121,12 +124,14 @@ def setup_driver() -> webdriver.Chrome:
     options.add_argument(f"--profile-directory=Default")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--start-maximized")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
+    # Modo headless: sem janela visível, imune a minimizar/focar
+    options.add_argument("--headless=new")
+    options.add_argument("--window-size=1920,1080")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    print("  → Iniciando Chrome com sessão copiada...")
+    print("  → Iniciando Chrome headless com sessão copiada...")
     return webdriver.Chrome(options=options)
 
 
@@ -296,17 +301,74 @@ def select_weekdays(driver, days: list):
 
 def click_lista_view(driver):
     """Clica no botão 'Lista' para exibir a listagem de estações."""
-    btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((
-            By.XPATH,
-            "//button[.//span[contains(@class,'components__atom__button__label--space__icon')]//span[normalize-space(text())='Lista']]"
-        ))
-    )
+    _LISTA_XPATHS = [
+        # Seletor original
+        "//button[.//span[contains(@class,'components__atom__button__label--space__icon')]//span[normalize-space(text())='Lista']]",
+        # Qualquer botão cujo texto visível seja 'Lista'
+        "//button[.//span[normalize-space(text())='Lista']]",
+        "//button[normalize-space(.)='Lista']",
+    ]
+    btn = None
+    for xpath in _LISTA_XPATHS:
+        try:
+            btn = WebDriverWait(driver, 8).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            break
+        except Exception:
+            continue
+    if btn is None:
+        raise Exception("Botão 'Lista' não encontrado. Verifique o seletor em click_lista_view().")
     scroll_and_click(driver, btn)
-    # Aguarda ao menos um item da lista carregar
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "span[data-bee='booking.item.display_name']"))
-    )
+
+    # Seletores de notificação/toast de erro do Quasar
+    _ERRO_NOTIF_CSS = ", ".join([
+        ".q-notification",
+        ".q-banner",
+        "[class*='notification']",
+        "[class*='alert']",
+        "[class*='error']",
+    ])
+    _FRASES_ERRO = [
+        "limite máximo",
+        "30 dias",
+        "precondition",
+        "regra",
+        "booking_rule",
+        "não é possível",
+        "não permitido",
+    ]
+
+    def _lista_ou_erro(d):
+        # Lista carregou
+        if d.find_elements(By.CSS_SELECTOR, "span[data-bee='booking.item.display_name']"):
+            return "ok"
+        # Notificação de erro visível
+        for el in d.find_elements(By.CSS_SELECTOR, _ERRO_NOTIF_CSS):
+            texto = el.text.lower()
+            if any(f in texto for f in _FRASES_ERRO):
+                return f"erro: {el.text.strip()}"
+        return None
+
+    try:
+        resultado = WebDriverWait(driver, 15).until(_lista_ou_erro)
+    except Exception:
+        resultado = None
+
+    if resultado == "ok":
+        return
+    elif resultado and resultado.startswith("erro:"):
+        raise Exception(f"Reserva bloqueada pela plataforma: {resultado[5:].strip()}")
+    else:
+        # Timeout sem lista e sem notificação — verifica se há algo visível na página
+        msgs = driver.find_elements(By.CSS_SELECTOR, _ERRO_NOTIF_CSS)
+        for el in msgs:
+            if el.text.strip():
+                raise Exception(f"Reserva bloqueada pela plataforma: {el.text.strip()}")
+        raise Exception(
+            "Lista de estações não carregou após 15s. Pode ser limite de antecedência (30 dias) "
+            "ou outro bloqueio da plataforma."
+        )
 
 
 def select_workstation(driver, name: str):
@@ -356,6 +418,144 @@ def confirm_reservation(driver):
 
 # ── Check-in ─────────────────────────────────────────────────
 
+_XPATH_CHECKIN_ATIVO = (
+    "//button[contains(@class,'booking-my-button-checkin')"
+    " and not(contains(@class,'booking-my-button-checkin-disable'))"
+    " and not(@disabled)"
+    " and .//span[normalize-space(text())='checkin']]"
+)
+
+_CHECKIN_INPUT_SELECTORS = [
+    "input[data-bee='checkin.code']",
+    "input[data-bee='booking.checkin.code']",
+    "input[data-bee='my-bookings.checkin.code']",
+    ".q-dialog input[type='text']",
+    ".q-dialog input",
+    "[role='dialog'] input[type='text']",
+    "[role='dialog'] input",
+]
+
+_CHECKIN_CONFIRM_XPATHS = [
+    "//button[.//span[contains(normalize-space(text()),'Confirmar')]]",
+    "//button[.//span[contains(normalize-space(text()),'Fazer check-in')]]",
+    "//button[.//span[contains(normalize-space(text()),'Fazer Check-in')]]",
+    "//button[.//span[contains(normalize-space(text()),'Check-in')]]",
+    "//button[.//span[contains(normalize-space(text()),'Checkin')]]",
+    "//button[.//span[contains(normalize-space(text()),'Enviar')]]",
+    "//button[.//span[contains(normalize-space(text()),'OK')]]",
+    # Qualquer botão primário dentro do dialog que não seja Buscar nem Fechar
+    ".//q-dialog //button[contains(@class,'bg-primary') and not(.//span[normalize-space(text())='Buscar'])]",
+    "//button[@type='submit' and not(.//span[normalize-space(text())='Buscar'])]",
+]
+
+
+def _submit_checkin_modal(driver, checkin_code: str) -> bool:
+    """
+    Aguarda o modal de check-in abrir, insere o código e confirma.
+    Retorna True se o check-in foi concluído, False em caso de falha não-crítica.
+    """
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".q-dialog, [role='dialog']"))
+    )
+    print("  → Modal aberto. Inserindo código de check-in...")
+
+    code_input = None
+    for sel in _CHECKIN_INPUT_SELECTORS:
+        try:
+            code_input = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+            )
+            break
+        except Exception:
+            continue
+
+    if code_input is None:
+        print("  ⚠  Input do código não encontrado no modal. Confirme manualmente.")
+        return False
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", code_input)
+    driver.execute_script("arguments[0].click();", code_input)
+    driver.execute_script(
+        "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input'));",
+        code_input,
+    )
+    code_input.send_keys(checkin_code)
+    driver.execute_script(
+        "arguments[0].dispatchEvent(new Event('input'));"
+        "arguments[0].dispatchEvent(new Event('change'));",
+        code_input,
+    )
+    print(f"  → Código '{checkin_code}' inserido!")
+
+    # Clica em "Buscar" para validar o código antes da confirmação final
+    _BUSCAR_XPATH = (
+        "//button[@type='submit' and .//span[normalize-space(text())='Buscar']]"
+        " | //button[contains(@class,'bg-primary') and .//span[normalize-space(text())='Buscar']]"
+        " | //button[.//span[normalize-space(text())='Buscar']]"
+    )
+    try:
+        buscar_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, _BUSCAR_XPATH))
+        )
+        scroll_and_click(driver, buscar_btn)
+        print("  → 'Buscar' clicado. Aguardando resultado...")
+        # Aguarda o botão Buscar sumir ou o botão de confirmação aparecer
+        WebDriverWait(driver, 10).until(
+            lambda d: not d.find_elements(By.XPATH, _BUSCAR_XPATH)
+                      or any(d.find_elements(By.XPATH, xp) for xp in _CHECKIN_CONFIRM_XPATHS)
+        )
+    except Exception:
+        print("  ⚠  Botão 'Buscar' não encontrado — tentando confirmar diretamente.")
+
+    for xpath in _CHECKIN_CONFIRM_XPATHS:
+        try:
+            confirm_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            scroll_and_click(driver, confirm_btn)
+            print("✔  Check-in realizado com sucesso!")
+            # Aguarda o modal fechar
+            WebDriverWait(driver, 5).until(
+                EC.invisibility_of_element_located((By.CSS_SELECTOR, ".q-dialog, [role='dialog']"))
+            )
+            return True
+        except Exception:
+            continue
+
+    # Fallback: fecha o modal com Escape para não bloquear o fluxo principal
+    print("⚠  Botão de confirmação não encontrado. Fechando modal e continuando...")
+    try:
+        from selenium.webdriver.common.keys import Keys
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        WebDriverWait(driver, 3).until(
+            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".q-dialog, [role='dialog']"))
+        )
+    except Exception:
+        pass
+    return False
+
+
+def try_checkin_from_home(driver, checkin_code: str) -> bool:
+    """
+    Verifica se há botão de check-in ativo na página atual (home) e o realiza.
+    Aguarda até 5s para o Vue renderizar o botão após o carregamento.
+    Retorna True se o check-in foi executado.
+    """
+    if not checkin_code:
+        return False
+
+    try:
+        btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, _XPATH_CHECKIN_ATIVO))
+        )
+    except Exception:
+        return False  # sem botão ativo na home
+
+    print("\n[→] Check-in disponível na página inicial. Realizando check-in...")
+    scroll_and_click(driver, btn)
+    return _submit_checkin_modal(driver, checkin_code)
+
+
 def do_checkin(driver, checkin_code: str):
     """
     Realiza o check-in da primeira reserva disponível em 'Minhas Reservas'.
@@ -368,7 +568,7 @@ def do_checkin(driver, checkin_code: str):
     """
     print("\n[→] Acessando 'Minhas Reservas' para check-in...")
     driver.get("https://totvs.deskbee.app/app/booking/my")
-    handle_sso_login(driver)
+    handle_sso_login(driver, LOGIN, SENHA)
 
     # Aguarda ao menos um card de reserva carregar
     WebDriverWait(driver, 15).until(
@@ -377,20 +577,12 @@ def do_checkin(driver, checkin_code: str):
 
     # O botão ativo NÃO tem a classe 'booking-my-button-checkin-disable'
     # nem o atributo `disabled`. Procura a primeira ocorrência habilitada.
-    xpath_ativo = (
-        "//button[contains(@class,'booking-my-button-checkin')"
-        " and not(contains(@class,'booking-my-button-checkin-disable'))"
-        " and not(@disabled)"
-        " and .//span[normalize-space(text())='checkin']]"
-    )
-
     print("  → Procurando botão de check-in habilitado...")
     try:
         btn_checkin = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, xpath_ativo))
+            EC.element_to_be_clickable((By.XPATH, _XPATH_CHECKIN_ATIVO))
         )
     except Exception:
-        # Verifica se existe mas ainda desabilitado — apenas avisa e pula
         todos = driver.find_elements(
             By.XPATH,
             "//button[contains(@class,'booking-my-button-checkin')"
@@ -404,78 +596,7 @@ def do_checkin(driver, checkin_code: str):
 
     scroll_and_click(driver, btn_checkin)
     print("  → Botão de check-in clicado. Aguardando modal...")
-
-    # Aguarda o modal/dialog abrir
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, ".q-dialog, [role='dialog']"))
-    )
-    print("  → Modal aberto. Inserindo código de check-in...")
-
-    # Tenta localizar o input dentro do modal — múltiplas estratégias
-    input_selectors = [
-        "input[data-bee='checkin.code']",
-        "input[data-bee='booking.checkin.code']",
-        "input[data-bee='my-bookings.checkin.code']",
-        ".q-dialog input[type='text']",
-        ".q-dialog input",
-        "[role='dialog'] input[type='text']",
-        "[role='dialog'] input",
-    ]
-
-    code_input = None
-    for sel in input_selectors:
-        try:
-            code_input = WebDriverWait(driver, 3).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-            )
-            print(f"  → Input encontrado via: {sel}")
-            break
-        except Exception:
-            continue
-
-    if code_input is None:
-        raise Exception(
-            "Input do código de check-in não encontrado no modal.\n"
-            "Verifique o HTML do modal e ajuste os seletores em do_checkin()."
-        )
-
-    # Preenche o código
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", code_input)
-    driver.execute_script("arguments[0].click();", code_input)
-    time.sleep(0.2)
-    driver.execute_script(
-        "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input'));",
-        code_input,
-    )
-    code_input.send_keys(checkin_code)
-    driver.execute_script(
-        "arguments[0].dispatchEvent(new Event('input'));"
-        "arguments[0].dispatchEvent(new Event('change'));",
-        code_input,
-    )
-    print(f"  → Código '{checkin_code}' inserido!")
-    time.sleep(0.3)
-
-    # Clica em confirmar dentro do modal
-    confirm_candidates = [
-        "//button[.//span[contains(normalize-space(text()),'Confirmar')]]",
-        "//button[.//span[contains(normalize-space(text()),'Fazer check-in')]]",
-        "//button[.//span[contains(normalize-space(text()),'Check-in')]]",
-        "//button[.//span[contains(normalize-space(text()),'Enviar')]]",
-        "//button[.//span[contains(normalize-space(text()),'OK')]]",
-    ]
-    for xpath in confirm_candidates:
-        try:
-            confirm_btn = WebDriverWait(driver, 3).until(
-                EC.element_to_be_clickable((By.XPATH, xpath))
-            )
-            scroll_and_click(driver, confirm_btn)
-            print("✔  Check-in realizado com sucesso!")
-            return
-        except Exception:
-            continue
-
-    print("⚠  Botão de confirmação do modal não encontrado. Confirme manualmente.")
+    _submit_checkin_modal(driver, checkin_code)
 
 
 # ── Data automática ──────────────────────────────────────────
@@ -488,44 +609,14 @@ def next_monday_after(date: datetime) -> datetime:
     return date + timedelta(days=days_ahead)
 
 
-def handle_sso_login(driver, timeout=120):
-    """
-    Se a página atual for o login SSO, clica em 'Entrar com SSO' e aguarda
-    o redirecionamento de volta para o app (pode exigir credenciais externas).
-    """
-    try:
-        # Aguarda um pouco para a página estabilizar
-        WebDriverWait(driver, 5).until(
-            lambda d: d.current_url != "about:blank"
-        )
-    except Exception:
-        pass
-
-    if "/login" not in driver.current_url:
-        return  # já está autenticado, nada a fazer
-
-    print("  → Página de login detectada. Clicando em 'Entrar com SSO'...")
-    btn = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((
-            By.XPATH,
-            "//button[.//span[normalize-space(text())='Entrar com SSO']]"
-        ))
-    )
-    btn.click()
-
-    # Aguarda o redirecionamento de volta para o app после SSO externo
-    print(f"  → Aguardando conclusão do login SSO (até {timeout}s)...")
-    WebDriverWait(driver, timeout).until(
-        lambda d: "/login" not in d.current_url and "deskbee.app" in d.current_url
-    )
-    print("  → Login SSO concluído!")
+# handle_sso_login importado de sso_login.py
 
 
 def get_last_reservation_date(driver) -> datetime:
     """Acessa diretamente a página de reservas, lê todas as datas e retorna a mais recente."""
     print("\n[→] Acessando 'Minhas reservas'...")
     driver.get("https://totvs.deskbee.app/app/booking/my")
-    handle_sso_login(driver)
+    handle_sso_login(driver, LOGIN, SENHA)
 
     # Aguarda ao menos um card de reserva carregar
     WebDriverWait(driver, 15).until(
@@ -582,7 +673,7 @@ def main():
         # 2. Vai para a página inicial
         print("\n[2/14] Acessando a página inicial...")
         driver.get("https://totvs.deskbee.app/app/home")
-        handle_sso_login(driver)
+        handle_sso_login(driver, LOGIN, SENHA)
         WebDriverWait(driver, 30).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -590,6 +681,20 @@ def main():
                 "//span[normalize-space(text())='Reserva Estação']"
             ))
         )
+
+        # Check-in automático se houver botão disponível na home
+        if CHECKIN_CODE:
+            try_checkin_from_home(driver, CHECKIN_CODE)
+            # Recarrega a home para garantir estado limpo antes de continuar
+            print("  → Recarregando página inicial para continuar o fluxo de reserva...")
+            driver.get("https://totvs.deskbee.app/app/home")
+            WebDriverWait(driver, 30).until(
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//span[contains(@class,'components__atom__button__label--space__icon')]"
+                    "//span[normalize-space(text())='Reserva Estação']"
+                ))
+            )
 
         # 3. Botão "Reserva Estação"
         print("[3/14] Clicando em 'Reserva Estação'...")
@@ -658,12 +763,16 @@ def main():
 
         print("\nProcesso concluído! (confirmação desabilitada para teste)")
 
-    except Exception:
-        print("\n[ERRO] Ocorreu um problema durante a automação:")
-        traceback.print_exc()
+    except Exception as e:
+        msg = str(e)
+        # Erros conhecidos da plataforma: exibe só a mensagem, sem traceback
+        if msg.startswith("Reserva bloqueada pela plataforma:"):
+            print(f"\n[AVISO] {msg}")
+        else:
+            print("\n[ERRO] Ocorreu um problema durante a automação:")
+            traceback.print_exc()
 
     finally:
-        input("\nPressione ENTER para fechar o browser...")
         driver.quit()
 
 
