@@ -406,15 +406,42 @@ def select_workstation(driver, name: str):
             "span[data-bee='booking.item.display_name']"
         ))
     )
-    # Botão "Selecionar" dentro do wrapper que contém o nome da estação
-    xpath = (
+
+    # Estratégias em ordem de especificidade decrescente
+    xpaths = [
+        # Seletor original via classe do wrapper
         f"//span[@data-bee='booking.item.display_name' and contains(normalize-space(text()),'{name}')]"
         "/ancestor::div[contains(@class,'components__system__workspace__item__wrapper-info')]"
-        "//button[@data-bee='booking.item.select']"
-    )
-    btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, xpath))
-    )
+        "//button[@data-bee='booking.item.select']",
+        # Qualquer ancestral div que contenha tanto o nome quanto o botão
+        f"//span[@data-bee='booking.item.display_name' and contains(normalize-space(text()),'{name}')]"
+        "/ancestor::div[.//button[@data-bee='booking.item.select']]"
+        "//button[@data-bee='booking.item.select']",
+        # Busca o botão pelo data-bee dentro do item que contenha o nome
+        f"//div[.//*[@data-bee='booking.item.display_name' and contains(normalize-space(text()),'{name}')]]"
+        "//button[@data-bee='booking.item.select']",
+        # Fallback mais amplo: qualquer botão com texto "Selecionar" próximo ao nome
+        f"//*[contains(normalize-space(text()),'{name}')]"
+        "/ancestor::*[.//button[contains(normalize-space(.),'Selecionar')]][1]"
+        "//button[contains(normalize-space(.),'Selecionar')]",
+    ]
+
+    btn = None
+    for xpath in xpaths:
+        try:
+            btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            break
+        except Exception:
+            continue
+
+    if btn is None:
+        raise Exception(
+            f"Botão 'Selecionar' não encontrado para a estação '{name}'. "
+            "Verifique se o nome está correto e se a estação aparece na lista."
+        )
+
     scroll_and_click(driver, btn)
     time.sleep(0.6)
 
@@ -746,7 +773,12 @@ def main():
 
         # Check-in automático (se disponível e configurado)
         if CHECKIN_CODE:
-            try_checkin_from_home(driver, CHECKIN_CODE)
+            print(f"  → Verificando check-in pendente (código: {CHECKIN_CODE})...")
+            feito = try_checkin_from_home(driver, CHECKIN_CODE)
+            if not feito:
+                print("  → Nenhum check-in disponível no momento. Continuando...")
+        else:
+            print("  → Check-in não configurado. Pulando.")
 
         # Após o check-in, recarrega a home para garantir estado limpo
         print("  → Recarregando página inicial para continuar o fluxo de reserva...")
