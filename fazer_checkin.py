@@ -9,6 +9,18 @@ Uso:
 O código de check-in é lido do config.cfg (campo checkin_code).
 """
 
+import os, sys
+# Se não estiver rodando dentro do .venv, relança com o Python do venv
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VENV_PYTHON = os.path.join(
+    _HERE, ".venv",
+    "Scripts" if sys.platform == "win32" else "bin",
+    "python.exe" if sys.platform == "win32" else "python",
+)
+if os.path.exists(_VENV_PYTHON) and os.path.abspath(sys.executable) != os.path.abspath(_VENV_PYTHON):
+    import subprocess
+    sys.exit(subprocess.call([_VENV_PYTHON] + sys.argv))
+
 import traceback
 
 from reservar_estacao import (

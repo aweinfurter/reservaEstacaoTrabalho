@@ -7,3 +7,6 @@ config.cfg
 # Cache Python
 __pycache__/
 *.pyc
+
+# Logs e arquivos temporários
+log_execucao.txt

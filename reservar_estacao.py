@@ -1,3 +1,15 @@
+import os, sys
+# Se não estiver rodando dentro do .venv, relança com o Python do venv
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VENV_PYTHON = os.path.join(
+    _HERE, ".venv",
+    "Scripts" if sys.platform == "win32" else "bin",
+    "python.exe" if sys.platform == "win32" else "python",
+)
+if os.path.exists(_VENV_PYTHON) and os.path.abspath(sys.executable) != os.path.abspath(_VENV_PYTHON):
+    import subprocess
+    sys.exit(subprocess.call([_VENV_PYTHON] + sys.argv))
+
 import configparser
 import os
 import shutil
@@ -45,12 +57,23 @@ LOGIN         = _cfg.get("auth", "login", fallback="")
 SENHA         = _cfg.get("auth", "senha", fallback="")
 
 # Perfil original do Chrome — onde está a sessão SSO salva.
-CHROME_PROFILE_DIR = os.path.expanduser("~/.config/google-chrome")
-CHROME_PROFILE     = "Default"
+# Detecta automaticamente o caminho correto em cada sistema operacional.
+import platform as _platform
+_sys = _platform.system()
+if _sys == "Windows":
+    CHROME_PROFILE_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")
+elif _sys == "Darwin":  # macOS
+    CHROME_PROFILE_DIR = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+else:  # Linux
+    CHROME_PROFILE_DIR = os.path.expanduser("~/.config/google-chrome")
 
-# Pasta temporária: o script copia os arquivos de sessão para cá
-# e inicia um Chrome separado, sem conflitar com o Chrome aberto.
-CHROME_TEMP_DIR    = "/tmp/chrome-deskbee-profile"
+CHROME_PROFILE = "Default"
+
+# Pasta temporária para a sessão copiada
+if _sys == "Windows":
+    CHROME_TEMP_DIR = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "chrome-deskbee-profile")
+else:
+    CHROME_TEMP_DIR = "/tmp/chrome-deskbee-profile"
 
 REMOTE_DEBUG_PORT  = None
 
@@ -177,9 +200,12 @@ def navigate_calendar(driver, target_month: int, target_year: int):
         cur_year_num = int(cur_year_text) if cur_year_text.isdigit() else target_year
 
         if (cur_year_num * 12 + cur_month_num) < (target_year * 12 + target_month):
-            driver.find_element(By.CSS_SELECTOR, "button[aria-label='Next month']").click()
+            btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Next month']")
         else:
-            driver.find_element(By.CSS_SELECTOR, "button[aria-label='Previous month']").click()
+            btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Previous month']")
+
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+        driver.execute_script("arguments[0].click();", btn)
 
         time.sleep(0.5)
 
