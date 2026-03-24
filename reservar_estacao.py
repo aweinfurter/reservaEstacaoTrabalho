@@ -680,6 +680,37 @@ def get_last_reservation_date(driver) -> datetime:
 
 
 # ── Fluxo principal ──────────────────────────────────────────
+_RESERVA_ESTACAO_XPATHS = [
+    # Seletor original
+    "//span[contains(@class,'components__atom__button__label--space__icon')]"
+    "//span[normalize-space(text())='Reserva Estação']",
+    # Botão com texto direto
+    "//button[.//*[normalize-space(text())='Reserva Estação']]",
+    # Qualquer elemento clicável com esse texto
+    "//*[normalize-space(text())='Reserva Estação']",
+]
+
+
+def _wait_home_ready(driver, timeout: int = 30):
+    """Aguarda a home carregar verificando múltiplos seletores para 'Reserva Estação'."""
+    def _home_pronta(d):
+        for xpath in _RESERVA_ESTACAO_XPATHS:
+            try:
+                els = d.find_elements(By.XPATH, xpath)
+                if els and els[0].is_displayed():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    try:
+        WebDriverWait(driver, timeout).until(_home_pronta)
+    except Exception:
+        raise Exception(
+            f"Página inicial não carregou o botão 'Reserva Estação' em {timeout}s.\n"
+            f"URL atual: {driver.current_url}\n"
+            "Verifique se o usuário tem permissão de reservar estação no DeskBee."
+        )
 
 def main():
     global TARGET_DAY, TARGET_MONTH, TARGET_YEAR
@@ -708,38 +739,42 @@ def main():
         print(f"\n Data calculada : {TARGET_DAY:02d}/{TARGET_MONTH:02d}/{TARGET_YEAR}")
         print("=" * 55)
 
-        # 2. Vai para a página inicial
+        # 2. Acessa a página inicial
         print("\n[2/14] Acessando a página inicial...")
         driver.get("https://totvs.deskbee.app/app/home")
         handle_sso_login(driver, LOGIN, SENHA)
-        WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//span[contains(@class,'components__atom__button__label--space__icon')]"
-                "//span[normalize-space(text())='Reserva Estação']"
-            ))
-        )
 
-        # Check-in automático se houver botão disponível na home
+        # Check-in automático (se disponível e configurado)
         if CHECKIN_CODE:
             try_checkin_from_home(driver, CHECKIN_CODE)
-            # Recarrega a home para garantir estado limpo antes de continuar
-            print("  → Recarregando página inicial para continuar o fluxo de reserva...")
-            driver.get("https://totvs.deskbee.app/app/home")
-            WebDriverWait(driver, 30).until(
-                EC.element_to_be_clickable((
-                    By.XPATH,
-                    "//span[contains(@class,'components__atom__button__label--space__icon')]"
-                    "//span[normalize-space(text())='Reserva Estação']"
-                ))
-            )
 
-        # 3. Botão "Reserva Estação"
+        # Após o check-in, recarrega a home para garantir estado limpo
+        print("  → Recarregando página inicial para continuar o fluxo de reserva...")
+        driver.get("https://totvs.deskbee.app/app/home")
+        handle_sso_login(driver, LOGIN, SENHA)
+        _wait_home_ready(driver)
+
+        # 3. Clicar em 'Reserva Estação'
         print("[3/14] Clicando em 'Reserva Estação'...")
-        wait_click(
-            driver, By.XPATH,
-            "//span[contains(@class,'components__atom__button__label--space__icon')]"
-            "//span[normalize-space(text())='Reserva Estação']"
+        clicked = False
+        for xpath in _RESERVA_ESTACAO_XPATHS:
+            try:
+                btn = WebDriverWait(driver, 8).until(
+                    EC.element_to_be_clickable((By.XPATH, xpath))
+                )
+                scroll_and_click(driver, btn)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            raise Exception("Botão 'Reserva Estação' não encontrado na página inicial.")
+
+        # Aguarda a página de reserva carregar
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "input[data-bee='booking.workspace.date']")
+            )
         )
 
         # 4. Abrir calendário — aguarda o input de data estar clicável
