@@ -149,13 +149,101 @@ def setup_driver() -> webdriver.Chrome:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    # Modo headless: sem janela visível, imune a minimizar/focar
+    # Headless invisível
     options.add_argument("--headless=new")
     options.add_argument("--window-size=1920,1080")
+    # Anti-detecção: remove flags que indicam controle por automação
+    options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    # User-Agent realista (sem "HeadlessChrome")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+
     print("  → Iniciando Chrome headless com sessão copiada...")
-    return webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(options=options)
+
+    # Script de stealth injetado em todas as páginas antes de qualquer JS do site.
+    # Cobre os principais fingerprints usados por reCAPTCHA / Cloudflare Turnstile.
+    _STEALTH_JS = """
+// 1. Apaga navigator.webdriver (principal sinal de automação)
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Restaura window.chrome (ausente no headless)
+if (!window.chrome) {
+    window.chrome = {
+        app: { isInstalled: false, InstallState: {}, RunningState: {} },
+        csi: function() {},
+        loadTimes: function() {},
+        runtime: {
+            PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+            PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64' },
+            PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64' },
+            RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' },
+            OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+            OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' }
+        }
+    };
+}
+
+// 3. Plugins realistas (headless normalmente tem lista vazia)
+const _plugins = [
+    { name: 'Chrome PDF Plugin',       filename: 'internal-pdf-viewer',   description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer',       filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+    { name: 'Native Client',           filename: 'internal-nacl-plugin',  description: '' },
+];
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const arr = _plugins.map(p => {
+            const mimeType = { type: 'application/pdf', suffixes: 'pdf', description: '', enabledPlugin: null };
+            const plugin = Object.create(Plugin.prototype);
+            Object.defineProperties(plugin, {
+                name:        { value: p.name, enumerable: true },
+                filename:    { value: p.filename, enumerable: true },
+                description: { value: p.description, enumerable: true },
+                length:      { value: 1, enumerable: true },
+                0:           { value: mimeType, enumerable: true },
+            });
+            mimeType.enabledPlugin = plugin;
+            return plugin;
+        });
+        const list = Object.create(PluginArray.prototype);
+        arr.forEach((p, i) => Object.defineProperty(list, i, { value: p, enumerable: true }));
+        Object.defineProperty(list, 'length', { value: arr.length });
+        list.item = i => list[i];
+        list.namedItem = name => arr.find(p => p.name === name) || null;
+        list.refresh = () => {};
+        return list;
+    }
+});
+
+// 4. Idiomas realistas
+Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
+
+// 5. Permissions API — simula comportamento real para 'notifications'
+const _origQuery = window.Permissions && window.Permissions.prototype.query;
+if (_origQuery) {
+    window.Permissions.prototype.query = function(params) {
+        if (params && params.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission, onchange: null });
+        }
+        return _origQuery.apply(this, arguments);
+    };
+}
+
+// 6. Remove variáveis globais injetadas pelo ChromeDriver (cdc_*)
+for (const key of Object.keys(window)) {
+    if (key.startsWith('cdc_') || key.startsWith('__selenium')) {
+        try { delete window[key]; } catch(_) {}
+    }
+}
+"""
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _STEALTH_JS})
+
+    return driver
 
 
 def scroll_and_click(driver, element):
@@ -708,17 +796,23 @@ def get_last_reservation_date(driver) -> datetime:
 
 # ── Fluxo principal ──────────────────────────────────────────
 _RESERVA_ESTACAO_XPATHS = [
-    # Seletor original
+    # Seletor original (texto exato dentro do span com classe específica)
     "//span[contains(@class,'components__atom__button__label--space__icon')]"
     "//span[normalize-space(text())='Reserva Estação']",
-    # Botão com texto direto
+    # Botão com texto direto (correspondência exata)
     "//button[.//*[normalize-space(text())='Reserva Estação']]",
-    # Qualquer elemento clicável com esse texto
+    # Qualquer elemento com texto exato
     "//*[normalize-space(text())='Reserva Estação']",
+    # Correspondência parcial no conteúdo profundo do elemento (cobre variações de UI)
+    "//*[contains(normalize-space(.), 'Reserva Estação')]",
+    # Variações de capitalização / grafia alternativa
+    "//*[contains(normalize-space(.), 'Reserva Esta')]",
+    # Botão cujo texto interno contenha 'Reserva' e 'Esta' (robusto a quebras de linha)
+    "//button[contains(., 'Reserva') and contains(., 'Esta')]",
 ]
 
 
-def _wait_home_ready(driver, timeout: int = 30):
+def _wait_home_ready(driver, timeout: int = 45):
     """Aguarda a home carregar verificando múltiplos seletores para 'Reserva Estação'."""
     def _home_pronta(d):
         for xpath in _RESERVA_ESTACAO_XPATHS:
@@ -733,10 +827,30 @@ def _wait_home_ready(driver, timeout: int = 30):
     try:
         WebDriverWait(driver, timeout).until(_home_pronta)
     except Exception:
+        # Diagnóstico: salva screenshot e lista botões visíveis para ajudar a depurar
+        _screenshot_path = "/tmp/deskbee_home_erro.png"
+        try:
+            driver.save_screenshot(_screenshot_path)
+            print(f"  [DEBUG] Screenshot salvo em: {_screenshot_path}")
+        except Exception:
+            pass
+
+        _botoes = []
+        try:
+            for el in driver.find_elements(By.TAG_NAME, "button"):
+                txt = el.text.strip()
+                if txt:
+                    _botoes.append(txt)
+        except Exception:
+            pass
+
+        _botoes_str = ", ".join(_botoes[:15]) if _botoes else "(nenhum botão encontrado)"
         raise Exception(
             f"Página inicial não carregou o botão 'Reserva Estação' em {timeout}s.\n"
             f"URL atual: {driver.current_url}\n"
-            "Verifique se o usuário tem permissão de reservar estação no DeskBee."
+            f"Botões visíveis na página: {_botoes_str}\n"
+            "Verifique se o usuário tem permissão de reservar estação no DeskBee.\n"
+            f"Screenshot salvo em: {_screenshot_path}"
         )
 
 def main():
