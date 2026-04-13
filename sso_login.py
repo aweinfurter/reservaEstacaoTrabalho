@@ -92,6 +92,45 @@ def _fill_sso_credentials(driver, login: str, senha: str):
     print("  → Credenciais enviadas. Aguardando redirecionamento...")
 
 
+def _handle_mfa(driver, timeout_mfa: int = 30):
+    """
+    Aguarda até `timeout_mfa` segundos pelo campo MFA (id='mfa-token').
+    Se encontrar, lê o token pelo terminal e preenche o campo via Selenium.
+    """
+    try:
+        mfa_input = WebDriverWait(driver, timeout_mfa).until(
+            EC.visibility_of_element_located((By.ID, "mfa-token"))
+        )
+    except Exception:
+        return  # sem campo MFA → nada a fazer
+
+    token = input("  → MFA detectado. Digite o código MFA: ").strip()
+    if not token:
+        raise Exception("Token MFA não informado. Login cancelado.")
+
+    mfa_input.clear()
+    mfa_input.send_keys(token)
+
+    # Tenta clicar no botão de confirmar
+    try:
+        confirm_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//button[@type='submit']"
+                " | //button[contains(@class,'btn-primary')]"
+                " | //input[@type='submit']",
+            ))
+        )
+        confirm_btn.click()
+    except Exception:
+        from selenium.webdriver.common.keys import Keys
+        mfa_input.send_keys(Keys.RETURN)
+
+    print("  → Token MFA enviado. Aguardando redirecionamento...")
+    time.sleep(2)
+    print(f"  → URL atual após MFA: {driver.current_url}")
+
+
 def _is_in_app(driver) -> bool:
     """Retorna True se o driver já estiver dentro do app DeskBee."""
     return "deskbee.app/app/" in driver.current_url
@@ -147,7 +186,31 @@ def handle_sso_login(driver, login: str = "", senha: str = "", timeout: int = 12
 
     _click_sso_button(driver)
     _fill_sso_credentials(driver, login, senha)
+    _handle_mfa(driver)
 
     print(f"  → Aguardando conclusão do login SSO (até {timeout}s)...")
-    WebDriverWait(driver, timeout).until(_is_in_app)
-    print("  → Login SSO concluído!")
+
+    def _login_concluido(d):
+        url = d.current_url
+        if _is_in_app(d):
+            return True
+        # SAML callback: sessão já autenticada, só precisa navegar para o app
+        if "deskbee.app/login" in url and "saml2_uuid" in url:
+            return True
+        not_auth = not any(x in url for x in ("/login", "/mfa", "/sso", "login.microsoftonline", "sts.", "/auth", "oauth", "mfa-token"))
+        in_app_domain = "deskbee.app" in url or "deskbee.com" in url
+        return not_auth and in_app_domain
+
+    try:
+        WebDriverWait(driver, timeout).until(_login_concluido)
+    except Exception:
+        print(f"  [!] Timeout aguardando login. URL atual: {driver.current_url}")
+        raise
+
+    # Se parou no callback SAML, navega para o app manualmente
+    if "saml2_uuid" in driver.current_url:
+        print("  → Callback SAML detectado. Navegando para o app...")
+        driver.get("https://totvs.deskbee.app/app/")
+        WebDriverWait(driver, 30).until(_is_in_app)
+
+    print(f"  → Login SSO concluído! URL: {driver.current_url}")
