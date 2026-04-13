@@ -859,6 +859,7 @@ def main():
     print("=" * 55)
     print(" Automação de Reserva — DeskBee / TOTVS")
     print("=" * 55)
+    print(f" Data        : {datetime.now().strftime('%d/%m/%Y')}")
     print(f" Horário     : {START_TIME} – {END_TIME}")
     print(f" Prédio      : {BUILDING}")
     print(f" Andar       : {FLOOR}")
