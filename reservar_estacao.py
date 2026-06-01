@@ -981,7 +981,7 @@ def main():
         select_workstation(driver, WORKSTATION)
         time.sleep(1)
 
-        print("\nProcesso concluído! (confirmação desabilitada para teste)")
+        print("\nProcesso concluído!")
 
     except Exception as e:
         msg = str(e)

@@ -1,8 +1,8 @@
 [reserva]
 building      = Joinville › Santa Catarina - Bloco B
 floor         = 3º Andar
-workstation   = B063
-checkin_code  = EST.JOIN.SC.BB.3/3B.B063
+workstation   = B062
+checkin_code  = EST.JOIN.SC.BB.3/3B.B062
 
 
 [auth]
